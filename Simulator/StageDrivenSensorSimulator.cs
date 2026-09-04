@@ -48,6 +48,7 @@ public abstract class StageDrivenSensorSimulator(
             {
                 Value = ComputeNext(_latest.Value, activeStages, noise),
                 Timestamp = timestamp,
+                Sequence = _latest.Sequence + 1,
             };
 
             // TryWrite never blocks and runs no consumer code (a full one-slot buffer just drops its old

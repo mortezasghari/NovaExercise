@@ -351,6 +351,29 @@ public class ReviewRegressionTests
     }
 
     [Fact]
+    public async Task A_rule_that_throws_at_runtime_raises_the_alarm_at_once_and_surfaces_the_crash()
+    {
+        var h = new StageHarness();
+        var stage = h.Stage([Resource("A")],
+            rule: v => v[SensorType.Temperature] is > 0 and < 1000 ? throw new InvalidOperationException("bad rule") : false,
+            options: h.Options() with { WatchdogPeriod = TimeSpan.FromMilliseconds(10), TimeProvider = TimeProvider.System });
+        var temperature = (TemperatureSensorSimulator)h.Registry.Sensors.First(s => s.Id == h.TemperatureId);
+        var pressure = (PressureSensorSimulator)h.Registry.Sensors.First(s => s.Id == h.PressureId);
+        using var cts = new CancellationTokenSource();
+        var run = stage.RunAsync(cts.Token);
+
+        await Wait.Until(() =>
+        {
+            temperature.Tick(DateTime.UtcNow, new HashSet<Stage>());
+            pressure.Tick(DateTime.UtcNow, new HashSet<Stage>());
+            return stage.DataAlarm;   // visible immediately, not at shutdown
+        });
+
+        cts.Cancel();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => run);   // and the host learns why
+    }
+
+    [Fact]
     public async Task A_second_RunAsync_on_the_same_stage_is_rejected()
     {
         var h = new StageHarness();

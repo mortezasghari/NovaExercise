@@ -468,6 +468,13 @@ public sealed class StageManager : IStageManager
         {
             OnStreamFailed(e); // the stage stays alive: the watchdog keeps running and the current run may finish
         }
+        catch (Exception e)
+        {
+            // A bug in this stage's own rule. Readings stop being processed, so say so now rather than at
+            // shutdown: raise the alarm, log it, and let RunAsync surface the crash to the host.
+            OnStreamFailed(new InvalidOperationException($"{_name} stopped processing readings: its rule threw", e));
+            throw;
+        }
     }
 
     private async Task WatchdogAsync(CancellationToken cancellationToken)

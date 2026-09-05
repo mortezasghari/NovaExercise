@@ -9,10 +9,10 @@ public enum StageState : byte
     /// <summary>Not running; evaluates its rule on every reading.</summary>
     Idle,
 
-    /// <summary>Rule fired; acquiring resources. Readings are recorded but not evaluated.</summary>
+    /// <summary>Rule fired; acquiring resources. Aborts if a resource fails or the rule stops holding.</summary>
     Acquiring,
 
-    /// <summary>Holds every resource and is doing its work.</summary>
+    /// <summary>Holds every resource and is doing its work. Aborts if a resource fails or the rule stops holding.</summary>
     Running,
 
     /// <summary>Last run ended because a resource was in Error. Behaves like Idle once its resources are healthy.</summary>
@@ -32,9 +32,10 @@ public interface IStageManager
 /// <summary>
 /// One stage as an independent process. It listens to the sensor registry, keeps the latest reading of each sensor, and
 /// while idle evaluates its rule on every reading once all sensors have reported and no reading is stale. When
-/// the rule holds it acquires its resources in the order given, does its work, releases, and goes back to idle
-/// (run-to-completion: readings arriving mid-run are recorded but trigger nothing). A resource that enters
-/// Error while held cancels the work; a resource in Error keeps the stage from starting until it recovers.
+/// the rule holds it acquires its resources in the order given, does its work, releases, and goes back to idle.
+/// While acquiring or running, every reading is a scan: if a resource the stage needs enters Error, or the rule
+/// no longer holds, the run is aborted and whatever is held is released. A resource in Error keeps the stage
+/// from starting until it recovers.
 /// Several stage managers run side by side and contend for the same resources with no central coordinator;
 /// the order in which each lists its resources is therefore the locking protocol of the whole machine.
 /// </summary>
@@ -57,6 +58,7 @@ public class StageManager(
     private readonly Dictionary<Guid, SensorData> _latest = [];
 
     private volatile StageState _state = StageState.Idle;
+    private volatile StageState _stateAfterAbort = StageState.Idle;
     private CancellationTokenSource? _runCts;
 
     public string Name => name;
@@ -121,21 +123,34 @@ public class StageManager(
                 }
 
                 logger.LogInformation("{Stage} rule fired on {Values}", name, values);
+                _stateAfterAbort = StageState.Idle;
                 _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 CurrentRun = ExecuteAsync(_runCts.Token);
                 break;
 
-            case StageState.Running when _runCts is { IsCancellationRequested: false }:
-                // The scan cycle: every reading is a chance to notice a held resource failing under us.
+            case StageState.Acquiring or StageState.Running when _runCts is { IsCancellationRequested: false }:
+                // The scan cycle: every reading is a chance to notice that the run should not continue, either
+                // because a resource we need has failed or because the condition that started us is gone.
                 var faulted = resources.FirstOrDefault(r => r.State == ResourceState.Error);
                 if (faulted is not null)
                 {
-                    logger.LogWarning("{Stage} aborting: {Resource} failed while held", name, faulted.Name);
-                    _runCts.Cancel();
+                    logger.LogWarning("{Stage} aborting while {State}: {Resource} is in Error", name, _state, faulted.Name);
+                    Abort(StageState.Faulted);
+                }
+                else if (TryGetConsistentValues(out var current) && !stageRule(current))
+                {
+                    logger.LogInformation("{Stage} aborting while {State}: rule no longer holds on {Values}", name, _state, current);
+                    Abort(StageState.Idle);
                 }
 
                 break;
         }
+    }
+
+    private void Abort(StageState stateAfterAbort)
+    {
+        _stateAfterAbort = stateAfterAbort;
+        _runCts!.Cancel();
     }
 
     /// <summary>
@@ -193,6 +208,7 @@ public class StageManager(
         catch (OperationCanceledException)
         {
             logger.LogInformation("{Stage} cancelled while {State}", name, _state);
+            next = _stateAfterAbort;
         }
         catch (ResourceErrorException e)
         {

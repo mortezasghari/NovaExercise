@@ -9,16 +9,22 @@ namespace Simulator;
 /// Mutual exclusion is a one-slot semaphore, so waiting acquirers park asynchronously instead of spinning.
 /// Driven by the clock: on every tick a healthy resource fails with <paramref name="failureProbabilityPerTick"/>,
 /// and a failed one recovers on its own after <paramref name="recoveryTicks"/> ticks.
+/// <paramref name="acquisitionLatency"/> models the handshake a real device needs before a request reaches it;
+/// it is what lets two stages interleave their acquisitions the way real ones do.
 /// <see cref="Fail"/> and <see cref="Recover"/> inject the same transitions by hand for tests and demos.
 /// </summary>
 public sealed class ResourceSimulator(
     string name,
     double failureProbabilityPerTick = 0.0,
     int recoveryTicks = 50,
+    TimeSpan? acquisitionLatency = null,
     Random? random = null,
     ILogger? logger = null) : IResource, ITickable
 {
+    public static readonly TimeSpan DefaultAcquisitionLatency = TimeSpan.FromMilliseconds(10);
+
     private readonly ILogger _logger = logger ?? NullLogger.Instance;
+    private readonly TimeSpan _acquisitionLatency = acquisitionLatency ?? DefaultAcquisitionLatency;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Random _random = random ?? Random.Shared;
 
@@ -64,8 +70,10 @@ public sealed class ResourceSimulator(
     {
         ThrowIfFaulted();
 
+        // The handshake happens before the slot is taken, so a cancellation here can never strand the slot.
+        await Task.Delay(_acquisitionLatency, cancellationToken);
         await _gate.WaitAsync(cancellationToken);
-        await Task.Delay(100, cancellationToken);
+
         lock (_lock)
         {
             // The resource may have failed while we were waiting. Give the slot back and report it.

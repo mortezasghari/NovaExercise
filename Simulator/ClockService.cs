@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
 namespace Simulator;
 
 /// <summary>Anything the simulation clock advances: sensors, resources, or any future simulated part.</summary>
@@ -20,12 +23,15 @@ public sealed class ClockService
     private readonly IReadOnlyList<ITickable> _tickables;
     private readonly ActiveStages _activeStages;
     private readonly TimeProvider _time;
+    private readonly ILogger _logger;
+    private long _tickCount;
 
     public ClockService(
         IReadOnlyList<ITickable> tickables,
         ActiveStages activeStages,
         TimeSpan? period = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ILogger? logger = null)
     {
         Period = period ?? DefaultPeriod;
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(Period, TimeSpan.Zero, nameof(period));
@@ -33,14 +39,19 @@ public sealed class ClockService
         _tickables = tickables;
         _activeStages = activeStages;
         _time = timeProvider ?? TimeProvider.System;
+        _logger = logger ?? NullLogger.Instance;
     }
 
     public TimeSpan Period { get; }
+
+    /// <summary>Number of ticks emitted so far.</summary>
+    public long TickCount => Volatile.Read(ref _tickCount);
 
     /// <summary>Ticks everything once per period until cancelled.</summary>
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
         using var timer = new PeriodicTimer(Period, _time);
+        _logger.LogInformation("Clock started: {Period} period, {TickableCount} tickables", Period, _tickables.Count);
 
         try
         {
@@ -53,6 +64,8 @@ public sealed class ClockService
         {
             // Shutdown requested
         }
+
+        _logger.LogInformation("Clock stopped after {TickCount} ticks", TickCount);
     }
 
     /// <summary>One simulation step: a single stage snapshot and timestamp applied to every tickable.</summary>
@@ -60,6 +73,8 @@ public sealed class ClockService
     {
         var timestamp = _time.GetUtcNow().UtcDateTime;
         var activeStages = _activeStages.Current;
+        var tick = Interlocked.Increment(ref _tickCount);
+        _logger.LogTrace("Tick {Tick} at {Timestamp:HH:mm:ss.fff}, active stages {ActiveStages}", tick, timestamp, activeStages);
 
         foreach (var tickable in _tickables)
         {

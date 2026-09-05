@@ -1,10 +1,11 @@
+using Microsoft.Extensions.Logging;
 using Sensor;
 
 namespace Simulator;
 
 /// <summary>Pressure in arbitrary units. Ambient 30, clamped to 0..200.</summary>
-public class PressureSensorSimulator(Guid id, double initialPressure, Random? random = null)
-    : StageDrivenSensorSimulator(id, SensorType.Pressure, DefaultModel, initialPressure, random)
+public class PressureSensorSimulator(Guid id, double initialPressure, Random? random = null, ILogger? logger = null)
+    : StageDrivenSensorSimulator(id, SensorType.Pressure, DefaultModel, initialPressure, random, logger)
 {
     public static readonly PhysicalModel DefaultModel = new(Ambient: 30.0, Min: 0.0, Max: 200.0);
 

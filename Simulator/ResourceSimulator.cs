@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Resources;
 
 namespace Simulator;
@@ -13,8 +15,10 @@ public sealed class ResourceSimulator(
     string name,
     double failureProbabilityPerTick = 0.0,
     int recoveryTicks = 50,
-    Random? random = null) : IResource, ITickable
+    Random? random = null,
+    ILogger? logger = null) : IResource, ITickable
 {
+    private readonly ILogger _logger = logger ?? NullLogger.Instance;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Random _random = random ?? Random.Shared;
 
@@ -51,6 +55,7 @@ public sealed class ResourceSimulator(
             }
 
             _held = true;
+            _logger.LogTrace("{Resource} acquired", name);
             return true;
         }
     }
@@ -71,6 +76,7 @@ public sealed class ResourceSimulator(
             }
 
             _held = true;
+            _logger.LogTrace("{Resource} acquired after waiting", name);
         }
     }
 
@@ -85,6 +91,7 @@ public sealed class ResourceSimulator(
 
             _held = false;
             _gate.Release();
+            _logger.LogTrace("{Resource} released{Faulted}", name, _faulted ? " (still in Error)" : "");
         }
     }
 
@@ -98,12 +105,14 @@ public sealed class ResourceSimulator(
                 if (--_ticksUntilRecovery <= 0)
                 {
                     _faulted = false;
+                    _logger.LogInformation("{Resource} recovered, now {State}", name, _held ? ResourceState.Busy : ResourceState.Idle);
                 }
             }
             else if (_random.NextDouble() < failureProbabilityPerTick)
             {
                 _faulted = true;
                 _ticksUntilRecovery = recoveryTicks;
+                _logger.LogWarning("{Resource} failed at random{Held}, recovery in {RecoveryTicks} ticks", name, _held ? " while held" : "", recoveryTicks);
             }
         }
     }
@@ -115,6 +124,7 @@ public sealed class ResourceSimulator(
         {
             _faulted = true;
             _ticksUntilRecovery = recoveryTicks;
+            _logger.LogWarning("{Resource} failed (injected){Held}", name, _held ? " while held" : "");
         }
     }
 
@@ -124,6 +134,7 @@ public sealed class ResourceSimulator(
         lock (_lock)
         {
             _faulted = false;
+            _logger.LogInformation("{Resource} recovered (injected)", name);
         }
     }
 

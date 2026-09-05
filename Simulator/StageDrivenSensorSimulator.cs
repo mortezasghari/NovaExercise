@@ -1,5 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Sensor;
 
 namespace Simulator;
@@ -15,8 +17,10 @@ public abstract class StageDrivenSensorSimulator(
     SensorType type,
     PhysicalModel model,
     double initialValue,
-    Random? random = null) : ISensor<SensorData>, ITickable
+    Random? random = null,
+    ILogger? logger = null) : ISensor<SensorData>, ITickable
 {
+    private readonly ILogger _logger = logger ?? NullLogger.Instance;
     // One lock guards the latest reading and the subscriber list.
     private readonly Lock _lock = new();
     private readonly List<ChannelWriter<SensorData>> _subscribers = [];
@@ -57,6 +61,8 @@ public abstract class StageDrivenSensorSimulator(
             {
                 subscriber.TryWrite(_latest);
             }
+
+            _logger.LogTrace("{SensorType} #{Sequence} = {Value:F2} ({SubscriberCount} subscribers)", type, _latest.Sequence, _latest.Value, _subscribers.Count);
         }
     }
 
@@ -79,6 +85,8 @@ public abstract class StageDrivenSensorSimulator(
             _subscribers.Add(channel.Writer);
         }
 
+        _logger.LogDebug("{SensorType} sensor {SensorId}: consumer subscribed", type, id);
+
         try
         {
             await foreach (var reading in channel.Reader.ReadAllAsync(cancellationToken))
@@ -92,6 +100,8 @@ public abstract class StageDrivenSensorSimulator(
             {
                 _subscribers.Remove(channel.Writer);
             }
+
+            _logger.LogDebug("{SensorType} sensor {SensorId}: consumer unsubscribed", type, id);
         }
     }
 

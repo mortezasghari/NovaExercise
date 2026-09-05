@@ -15,6 +15,7 @@ public record SensorData(Guid SensorId, double Value, SensorType Type, DateTime 
 
 public interface ISensor<out T> where T : SensorData
 {
+    Guid Id { get; }
     T GetSnapshot();
     IAsyncEnumerable<T> GetAsyncEnumerable(CancellationToken cancellationToken = default);
 }

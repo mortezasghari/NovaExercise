@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="Controller/Controller.csproj" />
   <Project Path="Resources/Resources.csproj" />
   <Project Path="Sensor/Sensor.csproj" />
   <Project Path="Simulator/Simulator.csproj" />

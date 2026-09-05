@@ -1,5 +1,29 @@
 **Nova take-home exercise — code review and requirements sanity check**
 
+> **Resolution (6 September 2026).** Every code finding below has been fixed after this review and is pinned by a
+> regression test in `NovaTests/ReviewRegressionTests.cs` (tests carry the finding id in their name). The
+> characterization probes this report refers to asserted the defective behaviour and were removed once the fixes
+> landed; the report itself is kept unchanged as a record of the state at commit `436a9d5`.
+>
+> | Finding | Resolution | Pinned by |
+> | --- | --- | --- |
+> | F01 | Rules are evaluated on complete frames only: every sensor must report again after the previous frame, within the skew window. | `F01_*` |
+> | F02 | Policy decided and implemented: work in progress continues while sensors are silent; a warning after `StaleAfter`, the data alarm after `DataBudget`; nothing starts without a fresh frame; a frame clears the alarm. A watchdog timer checks resource health and data age independently of readings. | `F02_*` |
+> | F03 | A sensor stream that ends or throws fails the merged stream with `SensorStreamException` at once; the stage raises its alarm immediately and stays alive. | `F03_*` |
+> | F04 | Every lifecycle transition is applied under one lock as a single step (state write plus publication); runs carry an id and stale transitions are ignored. | `F04_*` |
+> | F05 | All held resources are re-checked immediately before the Running transition. | `F05_*` |
+> | F06 | `MachineController` rejects duplicate resources per stage, duplicate stage names, empty resource lists, unknown resources, and rules that read an unregistered sensor type; the registry is frozen at construction. | `F06_*` |
+> | F07 | Readings whose sequence does not increase are dropped per sensor. | `F07_*` |
+> | F08 | Each run owns its linked cancellation source and disposes it when the run ends. | `F08_*` |
+> | F09 | Thread-id assertion replaced by simultaneous-progress; the ring exhibit uses per-stage gates instead of delays and passes with `DOTNET_PROCESSOR_COUNT=1`; prevention is exercised through `MachineController`. | `ConcurrencyExhibitTests` |
+> | F10 | Default stage duration is 0.8 s so runs complete; `--deadlock` uses a ring-ordered map; `--drop-sensor` shows the sensor-loss policy. | runner |
+> | F11 | README and design document with diagrams added; see the repository root. | docs |
+>
+> Also taken from the observations: releases continue past a failing release, a second `RunAsync` on a stage,
+> the controller or the clock is rejected, and a rule that throws at runtime raises the alarm immediately.
+> Left as documented limitations: per-stage required sensors, voting between redundant sensors, hysteresis at
+> rule thresholds, leases instead of bare `Release`, and live sensor replacement.
+
 Reviewed on 5 September 2026, against commit `436a9d5`. The working tree was clean when the review began. This report evaluates the implementation as it existed at that commit; the application and original tests have not been edited.
 
 **Assessment:** The project has a useful, understandable foundation: separated sensor/resource interfaces, independent consumers, explicit stage rules, cancellation-aware resource acquisition, and substantial tests. The default lock ordering correctly prevents circular waits between the supplied stages. I would fix the sensor consistency and stage lifecycle defects, strengthen the concurrency demonstrations, and add the missing design/run documentation before submitting it.
@@ -285,11 +309,12 @@ dotnet build NovaExercise.slnx --no-restore -m:1
 dotnet test NovaExercise.slnx --no-restore -m:1
 dotnet run --project NovaRunner/NovaRunner.csproj
 
-# Review characterization probes; passing confirms existing problematic behavior.
-dotnet test Review/Probes/ReviewProbes.csproj -m:1
+# Review characterization probes (removed after the fixes; see the resolution note at the top).
+# Their inverses live in NovaTests/ReviewRegressionTests.cs:
+dotnet test NovaTests/NovaTests.csproj --filter FullyQualifiedName~ReviewRegressionTests
 
-# Portability reproduction; expected to expose the thread-ID assumption.
-DOTNET_PROCESSOR_COUNT=1 dotnet test NovaTests/NovaTests.csproj --no-build --no-restore -m:1 --filter FullyQualifiedName~Stages_run_in_parallel_on_different_threads
+# Portability check: the suite passes with a single reported processor.
+DOTNET_PROCESSOR_COUNT=1 dotnet test NovaTests/NovaTests.csproj
 ```
 
-Use Ctrl+C to stop the runner. Supported flags are `--debug` and `--as-listed`; the latter uses the original acyclic map, not the ring exhibit. The review probes are supporting evidence and intentionally have not been added to the main solution. After fixes, turn the relevant reproductions into regression tests asserting the desired behavior rather than preserving assertions of the defect.
+Use Ctrl+C to stop the runner. At the time of the review the supported flags were `--debug` and `--as-listed`; the latter uses the original acyclic map, not the ring exhibit. See `dotnet run --project NovaRunner -- --help` for the current flags, including `--deadlock` and `--drop-sensor`.

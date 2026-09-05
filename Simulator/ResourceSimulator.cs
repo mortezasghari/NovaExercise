@@ -65,7 +65,7 @@ public sealed class ResourceSimulator(
         ThrowIfFaulted();
 
         await _gate.WaitAsync(cancellationToken);
-
+        await Task.Delay(100, cancellationToken);
         lock (_lock)
         {
             // The resource may have failed while we were waiting. Give the slot back and report it.

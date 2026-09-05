@@ -1,7 +1,12 @@
 <Solution>
-  <Project Path="Controller/Controller.csproj" />
-  <Project Path="NovaRunner/NovaRunner.csproj" />
-  <Project Path="Resources/Resources.csproj" />
-  <Project Path="Sensor/Sensor.csproj" />
-  <Project Path="Simulator/Simulator.csproj" />
+  <Folder Name="/src/">
+    <Project Path="Controller/Controller.csproj" />
+    <Project Path="NovaRunner/NovaRunner.csproj" />
+    <Project Path="Resources/Resources.csproj" />
+    <Project Path="Sensor/Sensor.csproj" />
+    <Project Path="Simulator/Simulator.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="NovaTests/NovaTests.csproj" />
+  </Folder>
 </Solution>

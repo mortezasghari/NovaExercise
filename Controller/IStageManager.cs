@@ -215,6 +215,12 @@ public class StageManager(
             logger.LogWarning("{Stage} failed: {Reason}", name, e.Message);
             next = StageState.Faulted;
         }
+        catch (Exception e)
+        {
+            // The stage's own work failed. It is a bug in that stage, not a reason for the stage to die:
+            // release everything, report it, and be ready for the next trigger.
+            logger.LogError(e, "{Stage} work threw", name);
+        }
         finally
         {
             foreach (var resource in held)

@@ -153,6 +153,29 @@ public class SensorSimulatorTests
     }
 
     [Fact]
+    public async Task A_muted_sensor_keeps_measuring_but_publishes_nothing_until_unmuted()
+    {
+        var s = new TemperatureSensorSimulator(Guid.NewGuid(), 20.0);
+        using var cts = new CancellationTokenSource();
+        await using var readings = s.GetAsyncEnumerable(cts.Token).GetAsyncEnumerator();
+        var first = readings.MoveNextAsync();
+        s.Tick(T0, None);
+        await first;
+
+        s.Muted = true;
+        s.Tick(T0, None);
+        s.Tick(T0, None);
+        Assert.Equal(3, s.GetSnapshot().Sequence);   // the device measured
+        var silent = readings.MoveNextAsync().AsTask();
+        Assert.False(await Wait.Completes(silent, 50)); // but the link carried nothing
+
+        s.Muted = false;
+        s.Tick(T0, None);
+        Assert.True(await silent);
+        Assert.Equal(4, readings.Current.Sequence);
+    }
+
+    [Fact]
     public async Task Stream_ends_with_cancellation_and_the_sensor_keeps_ticking()
     {
         var s = new TemperatureSensorSimulator(Guid.NewGuid(), 20.0);

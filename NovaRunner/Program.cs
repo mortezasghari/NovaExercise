@@ -4,11 +4,26 @@ using Sensor;
 using Simulator;
 
 // ---- Flags ---------------------------------------------------------------------------------------------------
-//   --debug            scheduler and stream detail
-//   --deadlock         ring-ordered stage map acquired as listed: the three stages deadlock within seconds
-//   --as-listed        acquire in the exercise's listed order (cycle-free as it happens) instead of by name
-//   --stage-seconds N  simulated work per stage run (default 0.8 s, short enough for the physics to let a run finish)
+const string Usage = """
+    Usage: dotnet run --project NovaRunner [-- flags]
+      --debug            scheduler and stream detail
+      --deadlock         ring-ordered stage map acquired as listed: the three stages deadlock within seconds
+      --as-listed        acquire in the exercise's listed order (cycle-free as it happens) instead of by name
+      --stage-seconds N  simulated work per stage run (default 0.8 s, short enough for the physics to let a run finish)
+      --drop-sensor S    after S seconds mute the pressure sensor for 8 s: shows the stale warning, the data alarm,
+                         work continuing, and the alarm clearing when data returns (budget is 5 s)
+      --help             this text
+    Press Ctrl+C to stop.
+    """;
+
+if (args.Contains("--help") || args.Contains("-h"))
+{
+    Console.WriteLine(Usage);
+    return;
+}
+
 var deadlockDemo = args.Contains("--deadlock");
+var dropSensorAfter = Argument("--drop-sensor", -1);
 var ordering = deadlockDemo || args.Contains("--as-listed") ? ResourceOrdering.AsListed : ResourceOrdering.ByName;
 var logLevel = args.Contains("--debug") ? LogLevel.Debug : LogLevel.Information;
 var stageDuration = TimeSpan.FromSeconds(Argument("--stage-seconds", 0.8));
@@ -77,12 +92,36 @@ log.LogInformation("Nova machine starting (ordering {Ordering}, stage duration {
 
 await Task.WhenAll(
     clock.RunAsync(shutdown.Token),
-    controller.RunAsync(shutdown.Token));
+    controller.RunAsync(shutdown.Token),
+    DropSensorAsync(shutdown.Token));
 
 log.LogInformation("Final state: {Stages}; resources {Resources}; data alarms {Alarms}",
     controller.Snapshot().Select(kv => $"{kv.Key}={kv.Value}"),
     resources.Select(r => $"{r.Name}={r.State}"),
     controller.DataAlarms());
+
+// Demo: the pressure sensor's link goes down for longer than the stages' data budget, then comes back.
+async Task DropSensorAsync(CancellationToken cancellationToken)
+{
+    if (dropSensorAfter < 0)
+    {
+        return;
+    }
+
+    try
+    {
+        await Task.Delay(TimeSpan.FromSeconds(dropSensorAfter), cancellationToken);
+        log.LogWarning("Demo: pressure sensor link down");
+        pressure.Muted = true;
+        await Task.Delay(TimeSpan.FromSeconds(8), cancellationToken);
+        pressure.Muted = false;
+        log.LogWarning("Demo: pressure sensor link restored");
+    }
+    catch (OperationCanceledException)
+    {
+        // Shutdown requested
+    }
+}
 
 static double Argument(string name, double fallback)
 {

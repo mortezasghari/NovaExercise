@@ -32,6 +32,18 @@ public abstract class StageDrivenSensorSimulator(
     public SensorType Type => type;
     public PhysicalModel Model => model;
 
+    /// <summary>
+    /// While muted the sensor keeps measuring but publishes nothing: the device is alive and its link is down.
+    /// For demonstrating how consumers cope with a silent sensor.
+    /// </summary>
+    public bool Muted
+    {
+        get => Volatile.Read(ref _muted);
+        set => Volatile.Write(ref _muted, value);
+    }
+
+    private bool _muted;
+
     /// <summary>Change in value per tick contributed by one active stage.</summary>
     protected abstract double StageDelta(Stage activeStage);
 
@@ -54,6 +66,11 @@ public abstract class StageDrivenSensorSimulator(
                 Timestamp = timestamp,
                 Sequence = _latest.Sequence + 1,
             };
+
+            if (Muted)
+            {
+                return;
+            }
 
             // TryWrite never blocks and runs no consumer code (a full one-slot buffer just drops its old
             // value), so publishing under the lock cannot deadlock against a consumer calling GetSnapshot.

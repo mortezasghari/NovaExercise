@@ -78,10 +78,9 @@ public class MachineControllerTests
     }
 
     [Fact]
-    public async Task Stages_run_in_parallel_on_different_threads()
+    public async Task Stages_with_disjoint_resources_run_at_the_same_time()
     {
         var (registry, temperature, pressure) = Sensors();
-        var threads = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
         var started = 0;
         var gate = new TaskCompletionSource();
         Func<CancellationToken, Task> work = async ct =>
@@ -91,12 +90,11 @@ public class MachineControllerTests
         };
         var controller = new MachineController(registry,
             [new FakeResource("R_A"), new FakeResource("R_B"), new FakeResource("R_C")],
-            [new("s1", ["R_A"], _ => true, work), new("s2", ["R_B"], _ => true, work), new("s3", ["R_C"], _ => true, work)],
-            stageStateChanged: (name, _) => threads.TryAdd(name, Environment.CurrentManagedThreadId));
+            [new("s1", ["R_A"], _ => true, work), new("s2", ["R_B"], _ => true, work), new("s3", ["R_C"], _ => true, work)]);
         using var cts = new CancellationTokenSource();
         var run = controller.RunAsync(cts.Token);
 
-        // Disjoint resources: all three must be Running at the same time.
+        // Simultaneous progress is the claim, not distinct threads: the pool may multiplex three stages onto fewer.
         await Wait.Until(() =>
         {
             temperature.Tick(T0, None);
@@ -104,11 +102,24 @@ public class MachineControllerTests
             return Volatile.Read(ref started) == 3;
         });
         Assert.All(controller.Snapshot().Values, state => Assert.Equal(StageState.Running, state));
-        Assert.Equal(3, threads.Values.Distinct().Count());
 
         gate.SetResult();
         cts.Cancel();
         await run;
+    }
+
+    [Fact]
+    public async Task A_second_RunAsync_on_the_same_machine_is_rejected()
+    {
+        var (registry, _, _) = Sensors();
+        var controller = new MachineController(registry, [new FakeResource("R_A")], [Definition("s", "R_A")]);
+        using var cts = new CancellationTokenSource();
+        var first = controller.RunAsync(cts.Token);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => controller.RunAsync(cts.Token));
+
+        cts.Cancel();
+        await first;
     }
 
     [Fact]
@@ -118,7 +129,7 @@ public class MachineControllerTests
         var healthyRan = false;
         var controller = new MachineController(registry, [new FakeResource("R_A"), new FakeResource("R_B")],
         [
-            new("bad", ["R_A"], _ => throw new InvalidOperationException("bad rule"), ct => Task.CompletedTask),
+            new("bad", ["R_A"], v => v[SensorType.Temperature] is > 0 and < 1000 && Crash(), ct => Task.CompletedTask),
             new("good", ["R_B"], _ => true, ct => { healthyRan = true; return Task.CompletedTask; }),
         ]);
         using var cts = new CancellationTokenSource();
@@ -157,6 +168,8 @@ public class MachineControllerTests
         Assert.All(controller.Snapshot().Values, state => Assert.Equal(StageState.Idle, state));
         Assert.All(resources, r => Assert.Equal(ResourceState.Idle, r.State));
     }
+
+    private static bool Crash() => throw new InvalidOperationException("bad rule at runtime");
 
     private static (SensorRegistry Registry, TemperatureSensorSimulator Temperature, PressureSensorSimulator Pressure) Sensors()
     {

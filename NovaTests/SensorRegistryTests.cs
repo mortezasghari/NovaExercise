@@ -49,6 +49,32 @@ public class SensorRegistryTests
     }
 
     [Fact]
+    public void Freezing_rejects_further_registration()
+    {
+        var registry = new SensorRegistry();
+        registry.Register(new TemperatureSensorSimulator(Guid.NewGuid(), 20.0));
+
+        registry.Freeze();
+
+        Assert.True(registry.IsFrozen);
+        Assert.Throws<InvalidOperationException>(() => registry.Register(new PressureSensorSimulator(Guid.NewGuid(), 30.0)));
+        Assert.Single(registry.Sensors);
+    }
+
+    [Fact]
+    public void Covers_by_id_set_requires_every_registered_sensor()
+    {
+        var registry = new SensorRegistry();
+        var t = new TemperatureSensorSimulator(Guid.NewGuid(), 20.0);
+        var p = new PressureSensorSimulator(Guid.NewGuid(), 30.0);
+        registry.Register(t);
+        registry.Register(p);
+
+        Assert.False(registry.Covers(new HashSet<Guid> { t.Id }));
+        Assert.True(registry.Covers(new HashSet<Guid> { t.Id, p.Id }));
+    }
+
+    [Fact]
     public void Empty_registry_is_covered_by_anything()
     {
         Assert.True(new SensorRegistry().Covers(new Dictionary<Guid, SensorData>()));

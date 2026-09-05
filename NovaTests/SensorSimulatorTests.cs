@@ -173,7 +173,7 @@ public class SensorSimulatorTests
     }
 
     [Fact]
-    public void Snapshot_is_readable_while_ticks_happen_on_another_thread()
+    public async Task Snapshot_is_readable_while_ticks_happen_on_another_thread()
     {
         var s = new PressureSensorSimulator(Guid.NewGuid(), 30.0);
         using var stop = new CancellationTokenSource();
@@ -192,6 +192,6 @@ public class SensorSimulatorTests
         }
 
         stop.Cancel();
-        ticker.Wait();
+        await ticker;
     }
 }

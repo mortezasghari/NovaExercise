@@ -8,6 +8,5 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="NovaTests/NovaTests.csproj" />
-    <Project Path="Review/Probes/ReviewProbes.csproj" />
   </Folder>
 </Solution>

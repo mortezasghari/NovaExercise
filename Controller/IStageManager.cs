@@ -1,12 +1,8 @@
-using Microsoft.Extensions.Logging;
-using Resources;
-using Sensor;
-
 namespace Controller;
 
 public enum StageState : byte
 {
-    /// <summary>Not running; evaluates its rule on every reading.</summary>
+    /// <summary>Not running; evaluates its rule on every complete sensor frame.</summary>
     Idle,
 
     /// <summary>Rule fired; acquiring resources. Aborts if a resource fails or the rule stops holding.</summary>
@@ -19,228 +15,41 @@ public enum StageState : byte
     Faulted,
 }
 
+/// <summary>Timing policy of a stage. Every value is a decision the assignment leaves open; see the design notes.</summary>
+public sealed record StageOptions
+{
+    /// <summary>Readings of one frame may be at most this far apart. Zero for a shared clock; larger for independent sensors.</summary>
+    public TimeSpan MaxReadingSkew { get; init; } = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>A warning is logged once when no complete frame has arrived for this long.</summary>
+    public TimeSpan StaleAfter { get; init; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// The data alarm is raised when no complete frame has arrived for this long. Work in progress continues
+    /// (the stage has no way to know which direction is safe), but nothing new starts until data returns.
+    /// </summary>
+    public TimeSpan DataBudget { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>How often the stage checks resource health and data age independently of sensor arrivals.</summary>
+    public TimeSpan WatchdogPeriod { get; init; } = TimeSpan.FromMilliseconds(100);
+
+    public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
+
+    public static StageOptions Default { get; } = new();
+}
+
 public interface IStageManager
 {
     string Name { get; }
 
     StageState State { get; }
 
-    /// <summary>Runs the stage as an independent process until cancelled.</summary>
+    /// <summary>
+    /// True when the stage has not seen a complete sensor frame within its data budget, or its sensor stream
+    /// has failed. Work in progress continues; nothing new starts until a fresh frame clears the alarm.
+    /// </summary>
+    bool DataAlarm { get; }
+
+    /// <summary>Runs the stage as an independent process until cancelled. One call per instance.</summary>
     Task RunAsync(CancellationToken cancellationToken);
-}
-
-/// <summary>
-/// One stage as an independent process. It listens to the sensor registry, keeps the latest reading of each sensor, and
-/// while idle evaluates its rule on every reading once all sensors have reported and no reading is stale. When
-/// the rule holds it acquires its resources in the order given, does its work, releases, and goes back to idle.
-/// While acquiring or running, every reading is a scan: if a resource the stage needs enters Error, or the rule
-/// no longer holds, the run is aborted and whatever is held is released. A resource in Error keeps the stage
-/// from starting until it recovers.
-/// Several stage managers run side by side and contend for the same resources with no central coordinator;
-/// the order in which each lists its resources is therefore the locking protocol of the whole machine.
-/// </summary>
-public class StageManager(
-    string name,
-    IReadOnlyList<IResource> resources,
-    SensorRegistry sensors,
-    Func<IReadOnlyDictionary<SensorType, double>, bool> stageRule,
-    Func<CancellationToken, Task> work,
-    Action<StageState> stateChanged,
-    ILogger<StageManager> logger,
-    TimeSpan? maxReadingSkew = null)
-    : IStageManager
-{
-    public static readonly TimeSpan DefaultMaxReadingSkew = TimeSpan.FromMilliseconds(250);
-
-    private readonly TimeSpan _maxSkew = maxReadingSkew ?? DefaultMaxReadingSkew;
-
-    // Touched only by the reading loop (and by tests calling OnReading directly), so no lock is needed.
-    private readonly Dictionary<Guid, SensorData> _latest = [];
-
-    private volatile StageState _state = StageState.Idle;
-    private volatile StageState _stateAfterAbort = StageState.Idle;
-    private CancellationTokenSource? _runCts;
-
-    public string Name => name;
-
-    public StageState State => _state;
-
-    /// <summary>Completes when the current run ends; completed immediately when not running. For tests.</summary>
-    public Task CurrentRun { get; private set; } = Task.CompletedTask;
-
-    /// <summary>Work that simply takes time.</summary>
-    public static Func<CancellationToken, Task> Delay(TimeSpan duration) => ct => Task.Delay(duration, ct);
-
-    public async Task RunAsync(CancellationToken cancellationToken)
-    {
-        logger.LogInformation("{Stage} started: listening to {SensorCount} sensors, needs {Resources}",
-            name, sensors.Sensors.Count, resources.Select(r => r.Name));
-
-        try
-        {
-            await foreach (var reading in sensors.ReadAllAsync(cancellationToken))
-            {
-                OnReading(reading, cancellationToken);
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // Shutdown requested
-        }
-        finally
-        {
-            _runCts?.Cancel();
-            await CurrentRun;
-            logger.LogInformation("{Stage} stopped", name);
-        }
-    }
-
-    /// <summary>
-    /// Feeds one reading. Public so tests can drive the stage without streams or clocks.
-    /// Must be called from one thread at a time.
-    /// </summary>
-    public void OnReading(SensorData reading, CancellationToken cancellationToken = default)
-    {
-        _latest[reading.SensorId] = reading;
-
-        switch (_state)
-        {
-            case StageState.Idle or StageState.Faulted:
-                if (!TryGetConsistentValues(out var values))
-                {
-                    return;
-                }
-
-                if (resources.Any(r => r.State == ResourceState.Error))
-                {
-                    logger.LogTrace("{Stage} not started: a resource is in Error", name);
-                    return;
-                }
-
-                if (!stageRule(values))
-                {
-                    return;
-                }
-
-                logger.LogInformation("{Stage} rule fired on {Values}", name, values);
-                _stateAfterAbort = StageState.Idle;
-                _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                CurrentRun = ExecuteAsync(_runCts.Token);
-                break;
-
-            case StageState.Acquiring or StageState.Running when _runCts is { IsCancellationRequested: false }:
-                // The scan cycle: every reading is a chance to notice that the run should not continue, either
-                // because a resource we need has failed or because the condition that started us is gone.
-                var faulted = resources.FirstOrDefault(r => r.State == ResourceState.Error);
-                if (faulted is not null)
-                {
-                    logger.LogWarning("{Stage} aborting while {State}: {Resource} is in Error", name, _state, faulted.Name);
-                    Abort(StageState.Faulted);
-                }
-                else if (TryGetConsistentValues(out var current) && !stageRule(current))
-                {
-                    logger.LogInformation("{Stage} aborting while {State}: rule no longer holds on {Values}", name, _state, current);
-                    Abort(StageState.Idle);
-                }
-
-                break;
-        }
-    }
-
-    private void Abort(StageState stateAfterAbort)
-    {
-        _stateAfterAbort = stateAfterAbort;
-        _runCts!.Cancel();
-    }
-
-    /// <summary>
-    /// The atomic view the rule sees: every sensor has measured at least once, and no reading is older than the
-    /// newest by more than the allowed skew. Evaluating one sensor from one moment and another from a different
-    /// moment as if they were one state is the atomicity violation this guards against.
-    /// </summary>
-    private bool TryGetConsistentValues(out IReadOnlyDictionary<SensorType, double> values)
-    {
-        values = null!;
-
-        if (!sensors.Covers(_latest) || _latest.Values.Any(r => r.Sequence == 0))
-        {
-            return false;
-        }
-
-        var newest = _latest.Values.Max(r => r.Timestamp);
-        if (_latest.Values.Any(r => newest - r.Timestamp > _maxSkew))
-        {
-            return false;
-        }
-
-        var byType = new Dictionary<SensorType, double>();
-        foreach (var reading in _latest.Values.OrderBy(r => r.Timestamp))
-        {
-            byType[reading.Type] = reading.Value; // several sensors of one type: the newest wins
-        }
-
-        values = byType;
-        return true;
-    }
-
-    private async Task ExecuteAsync(CancellationToken cancellationToken)
-    {
-        var held = new List<IResource>();
-        var next = StageState.Idle;
-
-        try
-        {
-            SetState(StageState.Acquiring);
-
-            // Acquired one after another in the order given, holding each while waiting for the next.
-            // Whether that can deadlock against the other stages depends on the orders they use.
-            foreach (var resource in resources)
-            {
-                await resource.AcquireAsync(cancellationToken);
-                held.Add(resource);
-                logger.LogDebug("{Stage} holds {Resource}", name, resource.Name);
-            }
-
-            SetState(StageState.Running);
-            await work(cancellationToken);
-            logger.LogInformation("{Stage} completed", name);
-        }
-        catch (OperationCanceledException)
-        {
-            logger.LogInformation("{Stage} cancelled while {State}", name, _state);
-            next = _stateAfterAbort;
-        }
-        catch (ResourceErrorException e)
-        {
-            logger.LogWarning("{Stage} failed: {Reason}", name, e.Message);
-            next = StageState.Faulted;
-        }
-        catch (Exception e)
-        {
-            // The stage's own work failed. It is a bug in that stage, not a reason for the stage to die:
-            // release everything, report it, and be ready for the next trigger.
-            logger.LogError(e, "{Stage} work threw", name);
-        }
-        finally
-        {
-            foreach (var resource in held)
-            {
-                resource.Release();
-            }
-
-            if (held.Count > 0)
-            {
-                logger.LogDebug("{Stage} released {Resources}", name, held.Select(r => r.Name));
-            }
-
-            SetState(next);
-        }
-    }
-
-    private void SetState(StageState state)
-    {
-        _state = state;
-        logger.LogInformation("{Stage} -> {State}", name, state);
-        stateChanged(state);
-    }
 }

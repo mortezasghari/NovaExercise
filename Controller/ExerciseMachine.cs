@@ -42,4 +42,17 @@ public static class ExerciseMachine
     /// <summary>The stage map with every stage doing the same timed work.</summary>
     public static IReadOnlyList<StageDefinition> Stages(TimeSpan stageDuration) =>
         Stages(_ => StageManager.Delay(stageDuration));
+
+    /// <summary>
+    /// The same machine with stage_2 and stage_3 listing their resources the other way round, so the listed
+    /// orders form a ring (A before B, B before C, C before A). With <see cref="ResourceOrdering.AsListed"/> the
+    /// three stages can deadlock; with <see cref="ResourceOrdering.ByName"/> they cannot. The exercise's own map
+    /// happens to be cycle-free as listed (A before C before B), which is why this variant exists for the demo.
+    /// </summary>
+    public static IReadOnlyList<StageDefinition> RingStages(TimeSpan stageDuration) =>
+    [
+        new(Stage1, [R_A, R_B], v => Rule1(v) || Rule3(v), StageManager.Delay(stageDuration)),
+        new(Stage2, [R_B, R_C], v => Rule1(v) || Rule2(v), StageManager.Delay(stageDuration)),
+        new(Stage3, [R_C, R_A], v => Rule2(v) || Rule3(v), StageManager.Delay(stageDuration)),
+    ];
 }

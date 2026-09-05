@@ -127,7 +127,7 @@ public class StageManagerTests
         var a = new FakeResource("A", journal);
         var b = new FakeResource("B", journal);
         var stage = new StageManager("s", [b, a], h.Registry, StageHarness.Rule1, ct => Task.CompletedTask,
-            state => { lock (journal) journal.Add($"state:{state}"); }, Microsoft.Extensions.Logging.Abstractions.NullLogger<StageManager>.Instance);
+            state => { lock (journal) journal.Add($"state:{state}"); }, Microsoft.Extensions.Logging.Abstractions.NullLogger<StageManager>.Instance, h.Options());
 
         h.Feed(stage, 25, 40, 1);
         await stage.CurrentRun;
@@ -182,9 +182,7 @@ public class StageManagerTests
         Assert.Equal(StageState.Idle, stage.State);
         Assert.Equal(ResourceState.Idle, a.State);
 
-        // One reading is enough to re-trigger (it pairs with the pressure from tick 1). Feeding a full pair
-        // would trigger twice, because work that fails synchronously returns the stage to Idle instantly.
-        stage.OnReading(h.Temp(25, 2));
+        h.Feed(stage, 25, 40, 2);
         await stage.CurrentRun;
         Assert.Equal(2, h.StatesSoFar().Count(s => s == StageState.Running));
     }
@@ -239,7 +237,7 @@ public class StageManagerTests
     }
 
     [Fact]
-    public async Task Abort_check_ignores_an_inconsistent_pair_of_readings()
+    public async Task A_lone_reading_is_not_a_frame_and_cannot_abort_a_run()
     {
         var h = new StageHarness();
         var gate = new TaskCompletionSource();
@@ -247,7 +245,7 @@ public class StageManagerTests
 
         h.Feed(stage, 25, 40, 1);
         await Wait.Until(() => stage.State == StageState.Running);
-        stage.OnReading(h.Temp(5, 10));   // rule would be false, but pressure is now 900 ms stale: not a valid view
+        stage.OnReading(h.Temp(5, 2));   // rule would be false against the old pressure, but that pair is not a frame
 
         Assert.Equal(StageState.Running, stage.State);
         gate.SetResult();
@@ -364,7 +362,7 @@ public class StageManagerTests
 
         a.Recover();
         gate.SetResult();
-        stage.OnReading(h.Temp(25, 4));   // a single reading: the completed gate makes the run finish instantly
+        h.Feed(stage, 25, 40, 4);
         await stage.CurrentRun;
         Assert.Equal(StageState.Idle, stage.State);
         Assert.Equal(2, h.StatesSoFar().Count(s => s == StageState.Running));

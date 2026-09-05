@@ -3,13 +3,21 @@ using Microsoft.Extensions.Logging;
 using Sensor;
 using Simulator;
 
-// ---- Knobs ---------------------------------------------------------------------------------------------------
-var clockPeriod = TimeSpan.FromMilliseconds(100);   // the exercise: sensors update every 100 ms
-var stageDuration = TimeSpan.FromSeconds(10);        // simulated work per stage run
-var resourceFailureProbabilityPerTick = 0.002;      // roughly one fault per resource every 50 s
-var resourceRecoveryTicks = 30;                     // 3 s at the default period
-var ordering = args.Contains("--as-listed") ? ResourceOrdering.AsListed : ResourceOrdering.ByName;
+// ---- Flags ---------------------------------------------------------------------------------------------------
+//   --debug            scheduler and stream detail
+//   --deadlock         ring-ordered stage map acquired as listed: the three stages deadlock within seconds
+//   --as-listed        acquire in the exercise's listed order (cycle-free as it happens) instead of by name
+//   --stage-seconds N  simulated work per stage run (default 0.8 s, short enough for the physics to let a run finish)
+var deadlockDemo = args.Contains("--deadlock");
+var ordering = deadlockDemo || args.Contains("--as-listed") ? ResourceOrdering.AsListed : ResourceOrdering.ByName;
 var logLevel = args.Contains("--debug") ? LogLevel.Debug : LogLevel.Information;
+var stageDuration = TimeSpan.FromSeconds(Argument("--stage-seconds", 0.8));
+
+// ---- Knobs ---------------------------------------------------------------------------------------------------
+var clockPeriod = TimeSpan.FromMilliseconds(100);                // the exercise: sensors update every 100 ms
+var resourceFailureProbabilityPerTick = 0.002;                   // roughly one fault per resource every 50 s
+var resourceRecoveryTicks = 30;                                  // 3 s at the default period
+var resourceAcquisitionLatency = TimeSpan.FromMilliseconds(10);  // device handshake before a resource is ready
 
 // ---- Logging -------------------------------------------------------------------------------------------------
 using var loggerFactory = LoggerFactory.Create(builder => builder
@@ -27,7 +35,7 @@ var temperature = new TemperatureSensorSimulator(Guid.NewGuid(), initialTemperat
 var pressure = new PressureSensorSimulator(Guid.NewGuid(), initialPressure: 30.0, logger: loggerFactory.CreateLogger("Sensor.Pressure"));
 
 var resources = new[] { ExerciseMachine.R_A, ExerciseMachine.R_B, ExerciseMachine.R_C }
-    .Select(name => new ResourceSimulator(name, resourceFailureProbabilityPerTick, resourceRecoveryTicks, logger: loggerFactory.CreateLogger($"Resource.{name}")))
+    .Select(name => new ResourceSimulator(name, resourceFailureProbabilityPerTick, resourceRecoveryTicks, resourceAcquisitionLatency, logger: loggerFactory.CreateLogger($"Resource.{name}")))
     .ToList();
 
 // The simulated environment reacts to which stages are running; this map is the only glue between the two sides.
@@ -47,7 +55,7 @@ sensors.Register(pressure);
 var controller = new MachineController(
     sensors,
     resources,
-    ExerciseMachine.Stages(stageDuration),
+    deadlockDemo ? ExerciseMachine.RingStages(stageDuration) : ExerciseMachine.Stages(stageDuration),
     ordering,
     stageStateChanged: (stage, state) => activeStages.Set(stageOf[stage], state == StageState.Running),
     loggerFactory);
@@ -64,12 +72,21 @@ Console.CancelKeyPress += (_, e) =>
     shutdown.Cancel();
 };
 
-log.LogInformation("Nova machine starting (ordering {Ordering}, stage duration {StageDuration}). Press Ctrl+C to stop.", ordering, stageDuration);
+log.LogInformation("Nova machine starting (ordering {Ordering}, stage duration {StageDuration}{Demo}). Press Ctrl+C to stop.",
+    ordering, stageDuration, deadlockDemo ? ", ring-ordered map: expect a deadlock" : "");
 
 await Task.WhenAll(
     clock.RunAsync(shutdown.Token),
     controller.RunAsync(shutdown.Token));
 
-log.LogInformation("Final state: {Stages}; resources {Resources}",
+log.LogInformation("Final state: {Stages}; resources {Resources}; data alarms {Alarms}",
     controller.Snapshot().Select(kv => $"{kv.Key}={kv.Value}"),
-    resources.Select(r => $"{r.Name}={r.State}"));
+    resources.Select(r => $"{r.Name}={r.State}"),
+    controller.DataAlarms());
+
+static double Argument(string name, double fallback)
+{
+    var args = Environment.GetCommandLineArgs();
+    var index = Array.IndexOf(args, name);
+    return index >= 0 && index + 1 < args.Length && double.TryParse(args[index + 1], out var value) ? value : fallback;
+}

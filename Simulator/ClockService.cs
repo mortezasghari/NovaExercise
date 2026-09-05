@@ -25,6 +25,7 @@ public sealed class ClockService
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
     private long _tickCount;
+    private int _started;
 
     public ClockService(
         IReadOnlyList<ITickable> tickables,
@@ -47,9 +48,14 @@ public sealed class ClockService
     /// <summary>Number of ticks emitted so far.</summary>
     public long TickCount => Volatile.Read(ref _tickCount);
 
-    /// <summary>Ticks everything once per period until cancelled.</summary>
+    /// <summary>Ticks everything once per period until cancelled. One call per instance: two loops would double the rate.</summary>
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
+        if (Interlocked.CompareExchange(ref _started, 1, 0) != 0)
+        {
+            throw new InvalidOperationException("The clock is already running.");
+        }
+
         using var timer = new PeriodicTimer(Period, _time);
         _logger.LogInformation("Clock started: {Period} period, {TickableCount} tickables", Period, _tickables.Count);
 

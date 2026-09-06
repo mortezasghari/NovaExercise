@@ -16,38 +16,49 @@ for a design that handles at least one deadlock and two non-deadlock concurrency
 
 ### Components
 
+Three views, from the outside in.
+
+**Level 0: the projects and who depends on whom.** Arrows are project references. The control system depends only
+on the two ports; the simulated world depends on the control system, never the reverse.
+
 ```mermaid
-flowchart TD
-    subgraph Host["NovaRunner (composition and lifetime)"]
-    end
-    subgraph Ports["Ports (abstractions only)"]
-        ISensor["Sensor: ISensor&lt;T&gt;, SensorData, SensorRegistry"]
-        IResource["Resources: IResource, ResourceState"]
-    end
-    subgraph Control["Controller (the control system)"]
-        MC["MachineController<br/>validate, resolve, order, run, stop"]
-        S1["StageManager stage_1"]
-        S2["StageManager stage_2"]
-        S3["StageManager stage_3"]
-        EM["ExerciseMachine<br/>rules and stage map as data"]
-    end
-    subgraph Sim["Simulator (the outside world, faked)"]
-        Clock["ClockService 100 ms"]
-        T["Temperature simulator"]
-        P["Pressure simulator"]
-        RA["Resource A"] ; RB["Resource B"] ; RC["Resource C"]
-        Active["ActiveStages"]
-    end
-    Host --> MC
-    Host --> Clock
-    MC --> S1 & S2 & S3
-    S1 & S2 & S3 -->|"one merged stream each"| ISensor
-    S1 & S2 & S3 -->|"acquire / release"| IResource
-    T & P -.implement.-> ISensor
-    RA & RB & RC -.implement.-> IResource
-    Clock -->|tick| T & P & RA & RB & RC
-    S1 & S2 & S3 -->|"state callback"| Active
-    Active -->|"snapshot per tick"| Clock
+flowchart LR
+    Runner[NovaRunner] --> Controller
+    Runner --> Simulator
+    Controller --> Sensor[Sensor port]
+    Controller --> Resources[Resources port]
+    Simulator --> Controller
+    Simulator --> Sensor
+    Simulator --> Resources
+```
+
+**Level 1: inside the control system.** The controller builds one stage manager per stage definition. Each stage
+manager is an independent process: it reads its own merged stream from the registry and acquires the resources it
+needs. Stages never talk to each other; they meet only at the resources.
+
+```mermaid
+flowchart LR
+    MC[MachineController] --> S1[stage_1]
+    MC --> S2[stage_2]
+    MC --> S3[stage_3]
+    Reg[(SensorRegistry)] -->|own stream| S1
+    Reg -->|own stream| S2
+    Reg -->|own stream| S3
+    S1 -->|acquire / release| R[(Resources A, B, C)]
+    S2 -->|acquire / release| R
+    S3 -->|acquire / release| R
+```
+
+**Level 2: inside the simulated world.** One clock ticks every simulated device with the same timestamp and the
+same snapshot of which stages are running, so the physics react to the machine. This whole box is replaced by
+device adapters in a real deployment.
+
+```mermaid
+flowchart LR
+    Clock[ClockService 100 ms] -->|tick| Sensors[Temperature, Pressure]
+    Clock -->|tick| Res[Resources A, B, C]
+    Active[(ActiveStages)] -->|snapshot| Clock
+    Stages[stage state callbacks] -->|set| Active
 ```
 
 | Component | Responsibility | Does not |
@@ -81,51 +92,67 @@ A real deployment replaces the `Simulator` project with device adapters and keep
 - **Everything else: logging.** Every component takes an `ILogger`; Information tells the story, Debug explains
   decisions, Trace shows every tick and reading.
 
-### Sequence: one tick to one run
+### Sequence: from a tick to a run
+
+Two halves. First, how readings become a frame the rule can be evaluated on.
 
 ```mermaid
 sequenceDiagram
     participant Clock
-    participant T as Temperature
-    participant P as Pressure
-    participant Reg as SensorRegistry stream
-    participant S as StageManager
-    participant RA as Resource A
-    participant RB as Resource B
-    Clock->>T: Tick(t, active)
-    T-->>Reg: reading #n (seq)
-    Clock->>P: Tick(t, active)
-    P-->>Reg: reading #n (seq)
-    Reg-->>S: temperature #n
-    Note over S: frame incomplete: pressure not yet reported
-    Reg-->>S: pressure #n
-    Note over S: frame complete, skew ok: evaluate rule
-    S->>S: Idle -> Acquiring (published)
-    S->>RA: AcquireAsync
-    RA-->>S: held
-    S->>RB: AcquireAsync
-    RB-->>S: held
-    S->>S: re-check held resources; Acquiring -> Running
-    S->>S: work(ct)
-    S->>RB: Release
-    S->>RA: Release
-    S->>S: Running -> Idle
+    participant Sensors
+    participant Stage
+    Clock->>Sensors: tick n
+    Sensors-->>Stage: temperature n
+    Note over Stage: half a frame: wait
+    Sensors-->>Stage: pressure n
+    Note over Stage: frame n complete: evaluate rule
 ```
 
-### State machines
+Second, what a stage does once its rule holds.
+
+```mermaid
+sequenceDiagram
+    participant Stage
+    participant A as Resource A
+    participant B as Resource B
+    Note over Stage: Idle -> Acquiring
+    Stage->>A: acquire
+    Stage->>B: acquire
+    Note over Stage: re-check both, then Acquiring -> Running
+    Stage->>Stage: work
+    Stage->>B: release
+    Stage->>A: release
+    Note over Stage: Running -> Idle
+```
+
+### The stage's states
+
+The happy path first.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> Acquiring: complete frame, rule holds,<br/>no resource in Error
-    Faulted --> Acquiring: complete frame, rule holds,<br/>no resource in Error
-    Acquiring --> Running: all resources held<br/>and healthy
-    Acquiring --> Idle: rule no longer holds<br/>(frame) or shutdown
-    Acquiring --> Faulted: a resource in Error<br/>(scan or refusal)
-    Running --> Idle: work done, or rule no<br/>longer holds, or shutdown
-    Running --> Faulted: a held resource<br/>enters Error
-    note right of Running: Data alarm is orthogonal:<br/>raised when no frame for DataBudget,<br/>cleared by the next frame.<br/>Work continues; nothing new starts.
+    Idle --> Acquiring: frame arrives and rule holds
+    Acquiring --> Running: all resources held
+    Running --> Idle: work done
 ```
+
+Then the two ways a run is cut short. A rule that stops holding sends the stage back to Idle; a resource that
+fails sends it to Faulted, from which it behaves like Idle once its resources are healthy again.
+
+```mermaid
+stateDiagram-v2
+    Acquiring --> Idle: rule no longer holds
+    Running --> Idle: rule no longer holds
+    Acquiring --> Faulted: a resource in Error
+    Running --> Faulted: a resource in Error
+    Faulted --> Acquiring: resources healthy, frame arrives, rule holds
+```
+
+The data alarm is not a state. It is a flag raised when no complete frame has arrived within the data budget and
+cleared by the next frame. Work in progress continues while it is raised; nothing new starts.
+
+### The resource's states
 
 ```mermaid
 stateDiagram-v2
@@ -133,11 +160,13 @@ stateDiagram-v2
     Idle --> Busy: acquire
     Busy --> Idle: release
     Idle --> Error: fault
-    Busy --> Error: fault (holder keeps the slot)
-    Error --> Idle: recovery, not held
-    Error --> Busy: recovery, still held
-    note right of Error: acquire fails immediately;<br/>a waiter is refused when it wakes
+    Busy --> Error: fault
+    Error --> Idle: recovers
 ```
+
+A holder keeps its slot when the resource fails and is expected to release; a resource that recovers while still
+held returns to Busy. Acquiring a resource in Error fails immediately, and a parked waiter is refused when it
+wakes.
 
 ## 3. Design considerations
 
@@ -213,17 +242,24 @@ takes a resource away (no preemption); and three stages that each need two of th
 whatever its definition lists. In a wait cycle each stage would have to be waiting for a resource greater than
 one it holds, ending at a resource smaller than where it started, which a total order forbids.
 
+The wait graph when the stages acquire in a ring (stage_1 A then B, stage_2 B then C, stage_3 C then A) and each
+has taken its first resource:
+
 ```mermaid
 flowchart LR
-    subgraph ring["Ring as listed: stage_1 A→B, stage_2 B→C, stage_3 C→A"]
-        S1["stage_1 holds A"] -->|waits B| S2["stage_2 holds B"]
-        S2 -->|waits C| S3["stage_3 holds C"]
-        S3 -->|waits A| S1
-    end
-    subgraph ordered["Same stages, global order A < B < C"]
-        O1["stage_1 A→B"] ; O2["stage_2 B→C"] ; O3["stage_3 A→C"]
-        note["No stage holds a later resource while waiting for an earlier one: no cycle"]
-    end
+    S1[stage_1 holds A] -->|waits for B| S2[stage_2 holds B]
+    S2 -->|waits for C| S3[stage_3 holds C]
+    S3 -->|waits for A| S1
+```
+
+The same three stages under the global order A, B, C. Stage 3 now asks for A first, which stage 1 holds, so it
+waits holding nothing. The graph is a chain, not a cycle, and the chain drains.
+
+```mermaid
+flowchart LR
+    S3[stage_3 holds nothing] -->|waits for A| S1[stage_1 holds A]
+    S1 -->|waits for B| S2[stage_2 holds B]
+    S2 -->|takes C, runs, releases| Done[free]
 ```
 
 Two things worth saying out loud. The exercise's map as listed (A→B, C→B, A→C) is already consistent with the
